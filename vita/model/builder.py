@@ -20,6 +20,8 @@ def load_pretrained_model(
     load_4bit=False,
     device_map="auto",
     device="cuda",
+    vision_tower_path=None,
+    audio_encoder_path=None,
     **kwargs,
 ):
     if model_type not in {"mixtral-8x7b", "nemo", "qwen2p5_instruct", "qwen2p5_fo_instruct"}:
@@ -41,7 +43,7 @@ def load_pretrained_model(
             bnb_4bit_quant_type="nf4",
         )
     else:
-        kwargs["torch_dtype"] = torch.float16
+        kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
 
     # Load VITA model
     if "lora" in model_name.lower() and model_base is None:
@@ -194,21 +196,36 @@ def load_pretrained_model(
             # model.hf_device_map
         elif model_type == "nemo":
             # import pdb; pdb.set_trace()
+            cfg = AutoConfig.from_pretrained(model_path)
+            if vision_tower_path is not None:
+                cfg.mm_vision_tower = vision_tower_path
+            if audio_encoder_path is not None:
+                cfg.mm_audio_encoder = audio_encoder_path
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
             model = VITAMistralForCausalLM.from_pretrained(
-                model_path, low_cpu_mem_usage=True, **kwargs
+                model_path, low_cpu_mem_usage=True, config=cfg, **kwargs
             )
         elif model_type == "qwen2p5_instruct":
             # import pdb; pdb.set_trace()
+            cfg = AutoConfig.from_pretrained(model_path)
+            if vision_tower_path is not None:
+                cfg.mm_vision_tower = vision_tower_path
+            if audio_encoder_path is not None:
+                cfg.mm_audio_encoder = audio_encoder_path
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
             model = VITAQwen2ForCausalLM.from_pretrained(
-                model_path, low_cpu_mem_usage=True, **kwargs
+                model_path, low_cpu_mem_usage=True, config=cfg, **kwargs
             )
         elif model_type == "qwen2p5_fo_instruct":
             # import pdb; pdb.set_trace()
+            cfg = AutoConfig.from_pretrained(model_path)
+            if vision_tower_path is not None:
+                cfg.mm_vision_tower = vision_tower_path
+            if audio_encoder_path is not None:
+                cfg.mm_audio_encoder = audio_encoder_path
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
             model = VITAFOQwen2ForCausalLM.from_pretrained(
-                model_path, low_cpu_mem_usage=True, **kwargs
+                model_path, low_cpu_mem_usage=True, config=cfg, **kwargs
             )
 
     model.resize_token_embeddings(len(tokenizer))
@@ -284,4 +301,3 @@ def load_pretrained_model(
         model.generation_config.eos_token_id = tokenizer.eos_token_id
 
     return tokenizer, model, image_processor, context_len
-

@@ -5,6 +5,7 @@ import time
 import numpy as np
 import torch
 from PIL import Image
+from transformers import AutoConfig
 
 
 from decord import VideoReader, cpu
@@ -132,6 +133,9 @@ if __name__ == "__main__":
     parser.add_argument("--conv_mode", type=str, default="mixtral_two")
     parser.add_argument("--question", type=str, default="")
     parser.add_argument("--frameCat", action='store_true')
+    parser.add_argument("--vision_tower_path", type=str, default=None)
+    parser.add_argument("--audio_encoder_path", type=str, default=None)
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
 
     # Parse the arguments
     args = parser.parse_args()
@@ -145,6 +149,13 @@ if __name__ == "__main__":
     qs = args.question
     assert (audio_path is None) != (qs == ""), "Exactly one of audio_path or qs must be non-None"
     conv_mode = args.conv_mode
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA device requested but not available")
+    compute_dtype = torch.float16 if device == "cuda" else torch.float32
 
     if args.frameCat:
         from vita.util.data_utils_video_audio_neg_frameCat import dynamic_preprocess
@@ -166,8 +177,24 @@ if __name__ == "__main__":
     disable_torch_init()
     model_path = os.path.expanduser(model_path)
     model_name = get_model_name_from_path(model_path)
+    vision_tower_path = args.vision_tower_path
+    audio_encoder_path = args.audio_encoder_path
+    if vision_tower_path is None or audio_encoder_path is None:
+        cfg = AutoConfig.from_pretrained(model_path)
+        if vision_tower_path is None:
+            vision_tower_path = getattr(cfg, "mm_vision_tower", None)
+        if audio_encoder_path is None:
+            audio_encoder_path = getattr(cfg, "mm_audio_encoder", None)
+    if vision_tower_path is None or audio_encoder_path is None:
+        raise ValueError("Cannot resolve vision/audio encoder paths from args or model config")
     tokenizer, model, image_processor, context_len = load_pretrained_model(
-        model_path, model_base, model_name, args.model_type
+        model_path,
+        model_base,
+        model_name,
+        args.model_type,
+        device=device,
+        vision_tower_path=vision_tower_path,
+        audio_encoder_path=audio_encoder_path,
     )
 
     model.resize_token_embeddings(len(tokenizer))
@@ -178,7 +205,7 @@ if __name__ == "__main__":
     image_processor = vision_tower.image_processor
 
     audio_encoder = model.get_audio_encoder()
-    audio_encoder.to(dtype=torch.float16)
+    audio_encoder.to(device=device, dtype=compute_dtype)
     audio_processor = audio_encoder.audio_processor
 
     model.eval()
@@ -189,9 +216,9 @@ if __name__ == "__main__":
         audio_length = torch.unsqueeze(torch.tensor(audio_length), dim=0)
         audio_for_llm_lens = torch.unsqueeze(torch.tensor(audio_for_llm_lens), dim=0)
         audios = dict()
-        audios["audios"] = audio.half().cuda()
-        audios["lengths"] = audio_length.half().cuda()
-        audios["lengths_for_llm"] = audio_for_llm_lens.cuda()
+        audios["audios"] = audio.to(device=device, dtype=compute_dtype)
+        audios["lengths"] = audio_length.to(device=device, dtype=compute_dtype)
+        audios["lengths_for_llm"] = audio_for_llm_lens.to(device=device)
     else:
         audio = torch.zeros(400, 80)
         audio_length = audio.shape[0]
@@ -200,9 +227,9 @@ if __name__ == "__main__":
         audio_length = torch.unsqueeze(torch.tensor(audio_length), dim=0)
         audio_for_llm_lens = torch.unsqueeze(torch.tensor(audio_for_llm_lens), dim=0)
         audios = dict()
-        audios["audios"] = audio.half().cuda()
-        audios["lengths"] = audio_length.half().cuda()
-        audios["lengths_for_llm"] = audio_for_llm_lens.cuda()
+        audios["audios"] = audio.to(device=device, dtype=compute_dtype)
+        audios["lengths"] = audio_length.to(device=device, dtype=compute_dtype)
+        audios["lengths_for_llm"] = audio_for_llm_lens.to(device=device)
         # audios = None
 
     # Check if the video exists
@@ -214,7 +241,7 @@ if __name__ == "__main__":
             video_framerate=video_framerate,
             image_aspect_ratio=getattr(model.config, "image_aspect_ratio", None),
         )
-        image_tensor = video_frames.half().cuda()
+        image_tensor = video_frames.to(device=device, dtype=compute_dtype)
         if audio_path:
             qs = DEFAULT_IMAGE_TOKEN * slice_len + "\n" + qs + DEFAULT_AUDIO_TOKEN
         else:
@@ -228,7 +255,7 @@ if __name__ == "__main__":
             image, p_num = dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=True)
         assert len(p_num) == 1
         image_tensor = model.process_images(image, model.config).to(
-            dtype=model.dtype, device="cuda"
+            dtype=model.dtype, device=device
         )
         if audio_path:
             qs = DEFAULT_IMAGE_TOKEN * p_num[0] + "\n" + qs + DEFAULT_AUDIO_TOKEN
@@ -236,7 +263,7 @@ if __name__ == "__main__":
             qs = DEFAULT_IMAGE_TOKEN * p_num[0] + "\n" + qs
         modality = "image"
     else:
-        image_tensor = torch.zeros((1, 3, 448, 448)).to(dtype=model.dtype, device="cuda")
+        image_tensor = torch.zeros((1, 3, 448, 448)).to(dtype=model.dtype, device=device)
         if audio_path:
             qs = qs + DEFAULT_AUDIO_TOKEN
         modality = "lang"
@@ -250,13 +277,13 @@ if __name__ == "__main__":
         input_ids = (
             tokenizer_image_audio_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             .unsqueeze(0)
-            .cuda()
+            .to(device)
         )
     else:
         input_ids = (
             tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             .unsqueeze(0)
-            .cuda()
+            .to(device)
         )
 
     stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
@@ -276,7 +303,7 @@ if __name__ == "__main__":
             output_scores=True,
             return_dict_in_generate=True,
             max_new_tokens=1024,
-            use_cache=True,
+            use_cache=False,
             stopping_criteria=[stopping_criteria],
             shared_v_pid_stride=None#2#16#8#4#1#None,
         )
@@ -296,5 +323,4 @@ if __name__ == "__main__":
     outputs = outputs.strip()
     print(outputs)
     print(f"Time consume: {infer_time}")
-
 

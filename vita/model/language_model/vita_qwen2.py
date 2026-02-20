@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple, Union
+import inspect
 
 import torch
 import torch.nn as nn
@@ -65,7 +66,7 @@ def custom_forward(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-    outputs = self.model(
+    model_forward_kwargs = dict(
         input_ids=input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -75,8 +76,13 @@ def custom_forward(
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
-        cache_position=cache_position,
     )
+    if (
+        cache_position is not None
+        and "cache_position" in inspect.signature(self.model.forward).parameters
+    ):
+        model_forward_kwargs["cache_position"] = cache_position
+    outputs = self.model(**model_forward_kwargs)
 
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -246,9 +252,14 @@ class VITAQwen2ForCausalLM(Qwen2ForCausalLM, VITAMetaForCausalLM):
         )
 
 #        import pdb; pdb.set_trace()
-        position_ids = _inputs["position_ids"]
-        cache_position = _inputs["cache_position"]
-        if cache_position.shape[-1] == 1 and position_ids.shape[-1] > 1:
+        position_ids = _inputs.get("position_ids", None)
+        cache_position = _inputs.get("cache_position", None)
+        if (
+            cache_position is not None
+            and position_ids is not None
+            and cache_position.shape[-1] == 1
+            and position_ids.shape[-1] > 1
+        ):
             new_position_ids = torch.zeros((position_ids.shape[0],1), dtype=position_ids.dtype, device=position_ids.device)
             new_position_ids[:, 0] = position_ids[0,-1] + cache_position[-1] + 1 - position_ids.shape[-1]
             position_ids = new_position_ids
@@ -299,6 +310,3 @@ class VITAQwen2ForCausalLM(Qwen2ForCausalLM, VITAMetaForCausalLM):
 
 AutoConfig.register("vita-Qwen2", VITAQwen2Config)
 AutoModelForCausalLM.register(VITAQwen2Config, VITAQwen2ForCausalLM)
-
-
-

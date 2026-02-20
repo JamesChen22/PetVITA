@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple, Union
+import inspect
 
 import torch
 import torch.nn as nn
@@ -65,7 +66,7 @@ def custom_forward(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-    outputs = self.model(
+    model_forward_kwargs = dict(
         input_ids=input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -75,8 +76,13 @@ def custom_forward(
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
-        cache_position=cache_position,
     )
+    if (
+        cache_position is not None
+        and "cache_position" in inspect.signature(self.model.forward).parameters
+    ):
+        model_forward_kwargs["cache_position"] = cache_position
+    outputs = self.model(**model_forward_kwargs)
 
     hidden_states = outputs[0]
     logits = self.lm_head(hidden_states)
@@ -279,4 +285,3 @@ class VITAMistralForCausalLM(MistralForCausalLM, VITAMetaForCausalLM):
 
 AutoConfig.register("vita-Mistral", VITAMistralConfig)
 AutoModelForCausalLM.register(VITAMistralConfig, VITAMistralForCausalLM)
-
